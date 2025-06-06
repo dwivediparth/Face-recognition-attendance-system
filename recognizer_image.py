@@ -1,0 +1,148 @@
+import face_recognition
+import cv2
+import numpy as np
+import pandas as pd
+import datetime
+import os
+from twilio.rest import Client
+
+# Twilio configuration
+ACCOUNT_SID = "******"  # Provided Account SID
+AUTH_TOKEN = "*****"    # Provided Auth Token
+TWILIO_PHONE_NUMBER = "****"  # Provided Twilio phone number
+RECIPIENT_PHONE_NUMBER = "*******"  # Provided recipient phone number
+
+def send_sms(name, status):
+    client = Client(ACCOUNT_SID, AUTH_TOKEN)
+    message = f"{status} for {name}. Date: {datetime.datetime.now().strftime('%Y-%m-%d')}"
+    
+    try:
+        client.messages.create(
+            body=message,
+            from_=TWILIO_PHONE_NUMBER,
+            to=RECIPIENT_PHONE_NUMBER
+        )
+        print(f"SMS sent to {RECIPIENT_PHONE_NUMBER}")
+    except Exception as e:
+        print(f"Failed to send SMS: {e}")
+
+# Define the path to the CSV file
+CSV_FILE_PATH = "attendance.csv"
+
+# Load known faces and their names
+known_face_encodings = []
+known_face_names = []
+
+# Add images of known individuals and their names
+def load_known_faces():
+    global known_face_encodings, known_face_names
+    images = ["images/person1.jpg", "images/person2.jpg", "images/person3.jpg"]  # Add paths to your images
+    names = ["Rony", "Ritik", "Madhu"]  # Corresponding names
+    
+    for image_path, name in zip(images, names):
+        try:
+            image = face_recognition.load_image_file(image_path)
+            encodings = face_recognition.face_encodings(image, num_jitters=10)  # Increase encoding accuracy
+            if encodings:
+                known_face_encodings.append(encodings[0])
+                known_face_names.append(name)
+            else:
+                print(f"Warning: No face detected in image {image_path}. Skipping...")
+        except Exception as e:
+            print(f"Error processing {image_path}: {e}")
+
+# Mark attendance
+def mark_attendance(name, status):
+    now = datetime.datetime.now()
+    date = now.strftime("%Y-%m-%d")
+    time = now.strftime("%H:%M:%S")
+
+    # Load existing data or create a new DataFrame if the file doesn't exist or is empty
+    if os.path.exists(CSV_FILE_PATH):
+        try:
+            existing_data = pd.read_csv(CSV_FILE_PATH)
+        except pd.errors.EmptyDataError:
+            existing_data = pd.DataFrame(columns=["Name", "Date", "Time", "Status"])
+    else:
+        existing_data = pd.DataFrame(columns=["Name", "Date", "Time", "Status"])
+
+    # Check for duplicates: same name, date, and status
+    is_duplicate = not existing_data[
+        (existing_data["Name"] == name) & 
+        (existing_data["Date"] == date) & 
+        (existing_data["Status"] == status)
+    ].empty
+
+    if not is_duplicate:
+        # Append new attendance record
+        new_entry = pd.DataFrame({"Name": [name], "Date": [date], "Time": [time], "Status": [status]})
+        updated_data = pd.concat([existing_data, new_entry], ignore_index=True)
+        updated_data.to_csv(CSV_FILE_PATH, index=False)
+        print(f"{status} logged for {name}. Date: {date}, Time: {time}")
+        send_sms(name, status)  # Send SMS after marking attendance
+    else:
+        print(f"Duplicate entry detected: {status} for {name} already exists for today.")
+
+# Main function for real-time face recognition
+def run_attendance_system():
+    load_known_faces()
+    video_capture = cv2.VideoCapture(0)
+
+    if not video_capture.isOpened():
+        print("Error: Could not access the webcam.")
+        return
+
+    try:
+        while True:
+            # Capture a single frame
+            ret, frame = video_capture.read()
+            if not ret:
+                print("Error: Failed to capture frame.")
+                break
+
+            # Resize frame for faster processing
+            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            rgb_small_frame = small_frame[:, :, ::-1]  # Convert BGR to RGB
+
+            # Find all face locations and face encodings
+            face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")
+            face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+
+            for face_encoding, face_location in zip(face_encodings, face_locations):
+                # Check if face matches a known face
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding, tolerance=0.5)
+                name = "Unknown"
+                status = "Unknown face detected"
+
+                # Use the known face with the smallest distance if any match
+                face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+                best_match_index = np.argmin(face_distances)
+                if matches and matches[best_match_index]:
+                    name = known_face_names[best_match_index]
+                    status = "Attendance marked"
+                
+                # Mark attendance and stop
+                mark_attendance(name, status)
+                print(status)
+
+                # Close the webcam
+                video_capture.release()
+                cv2.destroyAllWindows()
+                return
+
+            # Display the frame (Optional: can be commented out)
+            cv2.imshow("Face Recognition Attendance System", frame)
+
+            # Break the loop with 'q'
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("Exiting...")
+                break
+
+    finally:
+        # Release the webcam and close all OpenCV windows
+        video_capture.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    run_attendance_system()
+
